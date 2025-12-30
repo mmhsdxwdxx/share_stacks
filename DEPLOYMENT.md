@@ -1,0 +1,364 @@
+# Ubuntu 部署指南
+
+本指南帮助您在Ubuntu服务器上快速部署 share_stacks 项目。
+
+---
+
+## 前置要求
+
+- Ubuntu 20.04+ / 22.04+ / 24.04
+- 至少 8核 CPU、16GB RAM
+- 至少 50GB 可用磁盘空间
+- Sudo 权限
+
+---
+
+## 快速部署（5分钟完成）
+
+### 步骤 1: 安装 Docker
+
+```bash
+# 更新系统
+sudo apt update && sudo apt upgrade -y
+
+# 安装必要的包
+sudo apt install -y ca-certificates curl gnupg lsb-release
+
+# 添加 Docker 官方 GPG 密钥
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+# 设置 Docker 仓库
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 安装 Docker Engine
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# 验证安装
+docker --version
+docker compose version
+```
+
+---
+
+### 步骤 2: 配置 Docker 权限（可选，避免每次 sudo）
+
+```bash
+# 将当前用户添加到 docker 组
+sudo usermod -aG docker $USER
+
+# 重新登录或执行
+newgrp docker
+
+# 验证（不需要 sudo）
+docker run hello-world
+```
+
+---
+
+### 步骤 3: 克隆项目
+
+```bash
+# 克隆仓库
+git clone https://github.com/mmhsdxwdxx/share_stacks.git
+
+# 进入项目目录
+cd share_stacks
+```
+
+---
+
+### 步骤 4: 配置环境变量
+
+```bash
+# 复制环境变量模板
+cp .env.example .env
+
+# 编辑 .env 文件
+nano .env
+```
+
+**必须修改的密码字段**（生成强密码）：
+
+```bash
+# 生成强密码的方法
+openssl rand -base64 32
+```
+
+**修改以下字段**：
+```bash
+POSTGRES_PASSWORD=your_generated_password_here
+NEWAPI_DB_PASSWORD=your_generated_password_here
+LITELLM_DB_PASSWORD=your_generated_password_here
+VALKEY_PASSWORD=your_generated_password_here
+NEWAPI_SESSION_SECRET=your_generated_secret_here
+NEWAPI_CRYPTO_SECRET=your_generated_secret_here
+LITELLM_MASTER_KEY=sk-your_generated_master_key_here
+LITELLM_SALT_KEY=sk-your_generated_salt_key_here
+MCPO_API_KEY=sk-your_generated_mcpo_key_here
+```
+
+**保存并退出** (nano编辑器): `Ctrl+O` → `Enter` → `Ctrl+X`
+
+---
+
+### 步骤 5: 启动服务
+
+```bash
+# 创建必要的目录
+mkdir -p logs/newapi logs/litellm
+
+# 启动所有服务
+docker compose up -d
+
+# 查看启动状态
+docker compose ps
+```
+
+**预期输出**：
+```
+NAME                 IMAGE                              STATUS
+share_postgres       pgvector/pgvector:pg17            Up (healthy)
+share_valkey         valkey/valkey:7.2-alpine          Up (healthy)
+share_newapi         calciumion/new-api:latest         Up
+share_litellm        docker.litellm.ai/berriai/litellm main-stable  Up
+share_mcpo           ghcr.io/open-webui/mcpo:main      Up
+```
+
+---
+
+### 步骤 6: 验证部署
+
+```bash
+# 运行验证脚本
+bash verify.sh
+```
+
+**手动验证各服务**：
+
+```bash
+# 检查 PostgreSQL
+docker compose exec postgres pg_isready -U postgres
+
+# 检查 Valkey
+docker compose exec valkey valkey-cli -a YOUR_VALKEY_PASSWORD ping
+
+# 检查 new-api
+curl http://localhost:3000/api/status
+
+# 检查 LiteLLM
+curl http://localhost:4000/health
+
+# 检查 mcpo
+curl http://localhost:8010/health
+```
+
+---
+
+### 步骤 7: 配置 LiteLLM Virtual Key（重要安全步骤）
+
+1. 访问 LiteLLM UI: `http://YOUR_SERVER_IP:4000/ui`
+2. 使用 `.env` 中的 `LITELLM_MASTER_KEY` 登录
+3. 创建 Virtual Key:
+   - 点击 "Keys" → "Create Key"
+   - 设置名称: `mcpo-access`
+   - 复制生成的 key
+
+4. 更新 mcpo 配置:
+```bash
+nano mcpo/config.json
+```
+
+修改 `x-litellm-api-key`:
+```json
+{
+  "mcpServers": {
+    "deepwiki": {
+      "url": "http://litellm:4000/deepwiki_mcp/mcp",
+      "headers": {
+        "x-litellm-api-key": "Bearer YOUR_LITELLM_MCP_VKEY"
+      }
+    }
+  }
+}
+```
+
+5. 重启 mcpo:
+```bash
+docker compose restart mcpo
+```
+
+---
+
+## 防火墙配置
+
+```bash
+# 允许 SSH（重要，避免锁死）
+sudo ufw allow 22/tcp
+
+# 允许应用端口
+sudo ufw allow 3000/tcp  # new-api
+sudo ufw allow 4000/tcp  # LiteLLM
+sudo ufw allow 8010/tcp  # mcpo
+
+# 启用防火墙
+sudo ufw enable
+
+# 查看状态
+sudo ufw status
+```
+
+---
+
+## 设置服务自动启动
+
+```bash
+# Docker 已配置为自动启动
+sudo systemctl enable docker
+
+# 容器已配置为自动重启 (restart: always)
+```
+
+---
+
+## 访问服务
+
+| 服务 | URL | 说明 |
+|------|-----|------|
+| new-api | `http://YOUR_SERVER_IP:3000` | OpenAI 兼容 API |
+| LiteLLM UI | `http://YOUR_SERVER_IP:4000/ui` | LiteLLM 管理界面 |
+| mcpo | `http://YOUR_SERVER_IP:8010` | OpenAPI Tool Server |
+
+---
+
+## 更新部署
+
+当GitHub仓库有更新时：
+
+```bash
+# 进入项目目录
+cd share_stacks
+
+# 拉取最新代码
+git pull origin main
+
+# 如果有 docker-compose.yml 更改，重新启动
+docker compose down
+docker compose up -d
+
+# 如果只是配置更改，重启相关服务
+docker compose restart <service_name>
+```
+
+---
+
+## 常用维护命令
+
+```bash
+# 查看日志
+docker compose logs -f [service_name]
+
+# 重启服务
+docker compose restart [service_name]
+
+# 停止所有服务
+docker compose down
+
+# 完全清理（包括数据卷）
+docker compose down -v
+
+# 更新服务镜像
+docker compose pull
+docker compose up -d
+```
+
+---
+
+## 故障排查
+
+### 问题1: 容器启动失败
+
+```bash
+# 查看详细日志
+docker compose logs [service_name]
+
+# 检查配置
+docker compose config
+
+# 验证环境变量
+docker compose exec [service_name] env
+```
+
+### 问题2: 端口已被占用
+
+修改 `.env` 文件中的端口配置：
+```bash
+NEWAPI_PORT=3001
+LITELLM_PORT=4001
+MCPO_PORT=8011
+```
+
+然后重启服务：
+```bash
+docker compose down
+docker compose up -d
+```
+
+### 问题3: 权限被拒绝
+
+```bash
+# 添加用户到 docker 组
+sudo usermod -aG docker $USER
+
+# 重新登录
+newgrp docker
+```
+
+---
+
+## 安全建议
+
+1. ✅ 已使用 `.env` 文件保护敏感信息（不会提交到Git）
+2. ✅ 定期更新密码和密钥
+3. ✅ 使用 Virtual Key 而非 Master Key
+4. ✅ 配置防火墙限制访问
+5. ✅ 定期备份数据
+
+---
+
+## 性能优化
+
+本项目已针对 **8核CPU / 16GB RAM** 服务器优化：
+
+- **内存分配**: 总计 7.5GB 给容器
+- **CPU分配**: 总计 7.5 核给容器
+- **连接池**: 已配置优化
+- **健康检查**: 所有服务已启用
+
+**预期性能**：
+- 支持 10 个并发用户
+- 600 个并发 LLM 请求
+- 稳定的内存使用（8-10GB）
+
+---
+
+## 下一步
+
+部署完成后，您可以：
+
+1. **配置 OpenWebUI**: 连接到 `http://YOUR_SERVER_IP:3000/v1`
+2. **配置 LobeHub**: 使用 same API endpoint
+3. **配置 Dify**: 通过 mcpo 访问 MCP 工具
+4. **添加更多 MCP**: 编辑 `mcpo/config.json`
+
+详细配置请参考主 README.md 和 NETWORK.md。
+
+---
+
+**需要帮助？**
+
+- 查看项目仓库: https://github.com/mmhsdxwdxx/share_stacks
+- 提交 Issue: https://github.com/mmhsdxwdxx/share_stacks/issues
