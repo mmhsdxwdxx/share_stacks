@@ -61,14 +61,14 @@
 
 ### 1. 初始化目录结构
 
-**Linux/macOS:**
+**Linux/macOS (Ubuntu 部署环境):**
 ```bash
-bash init.sh
+bash scripts/init.sh
 ```
 
-**Windows PowerShell:**
+**Windows PowerShell (仅开发环境):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File init.ps1
+powershell -ExecutionPolicy Bypass -File scripts/init.ps1
 ```
 
 ### 2. 配置环境变量
@@ -101,14 +101,14 @@ docker compose ps
 
 ### 4. 验证部署
 
-**Linux/macOS:**
+**Linux/macOS (Ubuntu 部署环境):**
 ```bash
-bash verify.sh
+bash scripts/verify.sh
 ```
 
-**Windows PowerShell:**
+**Windows PowerShell (仅开发环境):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File verify.ps1
+powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
 ## 配置说明
@@ -236,8 +236,11 @@ share_stacks/
 ├── Dockerfile.litellm          # LiteLLM 自定义构建文件
 ├── .env                        # 环境变量（需手动配置）
 ├── .env.example               # 环境变量模板
-├── init.sh / init.ps1         # 初始化脚本
-├── verify.sh / verify.ps1     # 验证脚本
+├── scripts/                   # 自动化脚本目录
+│   ├── init.sh               # Linux/Ubuntu 初始化脚本
+│   ├── verify.sh             # Linux/Ubuntu 验证脚本
+│   ├── init.ps1              # Windows 初始化脚本（仅开发环境）
+│   └── verify.ps1            # Windows 验证脚本（仅开发环境）
 ├── README.md                  # 本文件
 ├── 新手配置指南.md              # 新手详细配置指南
 ├── 构建规范.md                 # 构建规范文档
