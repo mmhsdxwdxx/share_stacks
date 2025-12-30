@@ -6,7 +6,7 @@
       "headers": {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "x-litellm-api-key": "Bearer ${LITELLM_API_KEY}"
+        "x-litellm-api-key": "Bearer __LITELLM_MCP_VKEY__"
       }
     }
   }

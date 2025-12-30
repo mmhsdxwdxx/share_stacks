@@ -16,6 +16,11 @@ services:
     restart: always
     networks:
       - share_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -83,6 +88,11 @@ SQL
     restart: always
     networks:
       - share_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -103,17 +113,22 @@ SQL
     ports:
       - "${VALKEY_PORT}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a ${VALKEY_PASSWORD} ping | grep PONG"]
+      test: ["CMD-SHELL", "valkey-cli -a \"${VALKEY_PASSWORD}\" ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 30
 
   new-api:
-    image: calciumion/new-api:latest
+    image: calciumion/new-api:v0.10.4
     container_name: share_newapi
     restart: always
     networks:
       - share_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -149,7 +164,7 @@ SQL
       # Go runtime optimization
       GOMAXPROCS: "2"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/status"]
+      test: ["CMD-SHELL", "(command -v curl >/dev/null && curl -fsS http://localhost:3000/api/status >/dev/null) || (command -v wget >/dev/null && wget --quiet --tries=1 --spider http://localhost:3000/api/status)"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -164,6 +179,11 @@ SQL
     restart: always
     networks:
       - share_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -186,7 +206,7 @@ SQL
       TZ: ${TZ}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
-      DATABASE_URL: "postgresql://${LITELLM_DB_USER}:${LITELLM_DB_PASSWORD}@postgres:5432/${LITELLM_DB_NAME}?pool_size=20&max_overflow=10&pool_timeout=30&pool_recycle=3600"
+      DATABASE_URL: "postgresql://${LITELLM_DB_USER}:${LITELLM_DB_PASSWORD}@postgres:5432/${LITELLM_DB_NAME}?pool_size=5&max_overflow=5&pool_timeout=30&pool_recycle=3600"
 
       REDIS_HOST: valkey
       REDIS_PORT: "6379"
@@ -194,21 +214,21 @@ SQL
 
       # Rate limiting
       LITELLM_REQUEST_TIMEOUT: "120"
-      LITELLM_MAX_PARALLEL_REQUESTS: "100"
+      LITELLM_MAX_PARALLEL_REQUESTS: "30"
 
       # Performance
-      LITELLM_NUM_WORKERS: "6"
+      LITELLM_NUM_WORKERS: "4"
       LITELLM_WORKER_CLASS: "gevent"
       LITELLM_WORKER_TIMEOUT: "120"
     command: [
       "--config", "/app/config.yaml",
       "--port", "4000",
       "--run_gunicorn",
-      "--num_workers", "6",
+      "--num_workers", "4",
       "--worker_class", "gevent",
       "--timeout", "120",
       "--keepalive", "5",
-      "--worker_connections", "1000",
+      "--worker_connections", "500",
       "--max_requests", "1000",
       "--max_requests_jitter", "100",
       "--graceful_timeout", "30",
@@ -222,11 +242,17 @@ SQL
       start_period: 30s
 
   mcpo:
-    image: ghcr.io/open-webui/mcpo:main
+    image: ghcr.io/open-webui/mcpo:git-25b219a@sha256:88e4c770265810352cb420b2315391b751fafd96f8989cd37dce7b81631e6d1e
     container_name: share_mcpo
     restart: always
     networks:
       - share_network
+    env_file: .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -241,13 +267,15 @@ SQL
     ports:
       - "${MCPO_PORT}:8000"
     volumes:
-      - ./mcpo/config.json:/config/config.json:ro
-    command: [
-      "--host", "0.0.0.0",
-      "--port", "8000",
-      "--api-key", "${MCPO_API_KEY}",
-      "--config", "/config/config.json"
-    ]
+      - ./mcpo/config.template.json:/config/config.template.json:ro
+      - mcpo_config:/config
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+        : "$${LITELLM_MCP_VKEY:?LITELLM_MCP_VKEY is required}"
+        cp /config/config.template.json /config/config.json
+        sed -i "s/__LITELLM_MCP_VKEY__/$${LITELLM_MCP_VKEY}/g" /config/config.json
+        exec mcpo-server --host 0.0.0.0 --port 8000 --api-key "$$MCPO_API_KEY" --config /config/config.json
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -256,3 +284,4 @@ SQL
 
 volumes:
   share_pg_data:
+  mcpo_config:
