@@ -1,6 +1,20 @@
 # share_stacks: API + MCP 分发堆栈
 
+[English](#english) | [简体中文](#中文)
+
+---
+
+## 中文
+
 一个统一的分发堆栈，集成了 new-api、LiteLLM、mcpo、PostgreSQL 和 Valkey，用于内网部署的 AI 服务基础设施。
+
+### 特性
+
+- ✅ **STO MCP 支持**：完整支持 Stdio、SSE、Streamable HTTP 三种传输方式
+- ✅ **自定义构建**：使用自定义构建的 LiteLLM 镜像，版本固定为 v1.50.0
+- ✅ **资源优化**：针对 8 核 16GB 服务器优化，支持 10 个并发用户
+- ✅ **健康检查**：所有服务配置健康检查和自动重启
+- ✅ **内网隔离**：专用 Docker 桥接网络，服务间通过容器名通信
 
 ## 架构概览
 
@@ -219,19 +233,24 @@ docker compose up -d
 ```
 share_stacks/
 ├── docker-compose.yml          # 主配置文件
+├── Dockerfile.litellm          # LiteLLM 自定义构建文件
 ├── .env                        # 环境变量（需手动配置）
 ├── .env.example               # 环境变量模板
 ├── init.sh / init.ps1         # 初始化脚本
 ├── verify.sh / verify.ps1     # 验证脚本
-├── building-ruls.md           # 详细部署文档
 ├── README.md                  # 本文件
+├── 新手配置指南.md              # 新手详细配置指南
+├── 构建规范.md                 # 构建规范文档
+├── 部署指南.md                 # Ubuntu 部署指南
+├── 网络配置.md                 # 网络配置说明
 ├── litellm/
 │   └── config.yaml            # LiteLLM 配置
 ├── mcpo/
 │   └── config.json            # mcpo 配置
 ├── postgres-init/
 │   ├── 01-create-dbs.sql
-│   └── 02-enable-extensions.sql
+│   ├── 02-enable-extensions.sql
+│   └── 03-performance-tuning.conf
 ├── newapi-data/               # new-api 数据目录
 └── logs/                      # 日志目录
     ├── newapi/
@@ -255,4 +274,22 @@ share_stacks/
 - [new-api 文档](https://github.com/Calcium-Ion/new-API)
 - [LiteLLM 文档](https://docs.litellm.ai/)
 - [mcpo 文档](https://github.com/open-webui/mcpo)
-- 详细部署文档：参见 [building-ruls.md](building-ruls.md)
+- 详细配置文档：参见 [新手配置指南.md](新手配置指南.md)
+- 部署指南：参见 [部署指南.md](部署指南.md)
+- 网络配置：参见 [网络配置.md](网络配置.md)
+
+---
+
+## English
+
+A unified distribution stack integrating new-api, LiteLLM, mcpo, PostgreSQL, and Valkey for on-premise AI service infrastructure.
+
+### Features
+
+- ✅ **STO MCP Support**: Full support for Stdio, SSE, and Streamable HTTP transports
+- ✅ **Custom Build**: Uses custom-built LiteLLM image, pinned at version v1.50.0
+- ✅ **Resource Optimized**: Optimized for 8-core 16GB servers, supporting 10 concurrent users
+- ✅ **Health Checks**: All services configured with health checks and auto-restart
+- ✅ **Network Isolation**: Dedicated Docker bridge network with inter-service communication via container names
+
+For detailed documentation in English, please refer to the Chinese documentation sections above or use translation tools.
