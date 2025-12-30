@@ -1,0 +1,255 @@
+version: "3.9"
+
+networks:
+  share_network:
+    driver: bridge
+    name: share_ai_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: share_postgres
+    restart: always
+    networks:
+      - share_network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2.5G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - share_pg_data:/var/lib/postgresql/data
+      - ./postgres-init:/init:ro
+      - ./postgres-init/03-performance-tuning.conf:/etc/postgresql/postgresql.conf:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # one-shot init job to create db/users and enable extensions (env-safe)
+  pg_init:
+    image: pgvector/pgvector:pg17
+    container_name: share_pg_init
+    networks:
+      - share_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    env_file: .env
+    volumes:
+      - ./postgres-init:/init:ro
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      psql "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/postgres" -v ON_ERROR_STOP=1 <<SQL
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${NEWAPI_DB_USER}') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${NEWAPI_DB_USER}', '${NEWAPI_DB_PASSWORD}');
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${NEWAPI_DB_NAME}') THEN
+          EXECUTE format('CREATE DATABASE %I OWNER %I', '${NEWAPI_DB_NAME}', '${NEWAPI_DB_USER}');
+        END IF;
+
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${LITELLM_DB_USER}') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${LITELLM_DB_USER}', '${LITELLM_DB_PASSWORD}');
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${LITELLM_DB_NAME}') THEN
+          EXECUTE format('CREATE DATABASE %I OWNER %I', '${LITELLM_DB_NAME}', '${LITELLM_DB_USER}');
+        END IF;
+      END
+      $$;
+SQL
+      && psql "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/postgres" -v ON_ERROR_STOP=1 -f /init/02-enable-extensions.sql
+
+  valkey:
+    image: valkey/valkey:7.2-alpine
+    container_name: share_valkey
+    restart: always
+    networks:
+      - share_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    command: [
+      "valkey-server",
+      "--appendonly", "yes",
+      "--requirepass", "${VALKEY_PASSWORD}",
+      "--maxmemory", "900mb",
+      "--maxmemory-policy", "allkeys-lru",
+      "--maxclients", "100",
+      "--timeout", "300"
+    ]
+    ports:
+      - "${VALKEY_PORT}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a ${VALKEY_PASSWORD} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: share_newapi
+    restart: always
+    networks:
+      - share_network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      pg_init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${NEWAPI_PORT}:3000"
+    volumes:
+      - ./newapi-data:/data
+      - ./logs/newapi:/app/logs
+    environment:
+      TZ: ${TZ}
+
+      # new-api official env names
+      SQL_DSN: "postgresql://${NEWAPI_DB_USER}:${NEWAPI_DB_PASSWORD}@postgres:5432/${NEWAPI_DB_NAME}?sslmode=disable&pool_max_conns=20&pool_min_conns=5&pool_max_conn_lifetime=3600&pool_max_conn_idle_time=300"
+      REDIS_CONN_STRING: "redis://default:${VALKEY_PASSWORD}@valkey:6379?max_connections=20&socket_timeout=5&socket_connect_timeout=5"
+
+      SESSION_SECRET: ${NEWAPI_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEWAPI_CRYPTO_SECRET}
+
+      ERROR_LOG_ENABLED: "true"
+      MEMORY_CACHE_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+
+      # Go runtime optimization
+      GOMAXPROCS: "2"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: share_litellm
+    restart: always
+    networks:
+      - share_network
+    deploy:
+      resources:
+        limits:
+          cpus: '3.0'
+          memory: 2G
+        reservations:
+          cpus: '1.5'
+          memory: 1G
+    depends_on:
+      pg_init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${LITELLM_PORT}:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+      - ./logs/litellm:/var/log/litellm
+    environment:
+      TZ: ${TZ}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: "postgresql://${LITELLM_DB_USER}:${LITELLM_DB_PASSWORD}@postgres:5432/${LITELLM_DB_NAME}?pool_size=20&max_overflow=10&pool_timeout=30&pool_recycle=3600"
+
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${VALKEY_PASSWORD}
+
+      # Rate limiting
+      LITELLM_REQUEST_TIMEOUT: "120"
+      LITELLM_MAX_PARALLEL_REQUESTS: "100"
+
+      # Performance
+      LITELLM_NUM_WORKERS: "6"
+      LITELLM_WORKER_CLASS: "gevent"
+      LITELLM_WORKER_TIMEOUT: "120"
+    command: [
+      "--config", "/app/config.yaml",
+      "--port", "4000",
+      "--run_gunicorn",
+      "--num_workers", "6",
+      "--worker_class", "gevent",
+      "--timeout", "120",
+      "--keepalive", "5",
+      "--worker_connections", "1000",
+      "--max_requests", "1000",
+      "--max_requests_jitter", "100",
+      "--graceful_timeout", "30",
+      "--preload"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: share_mcpo
+    restart: always
+    networks:
+      - share_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    depends_on:
+      litellm:
+        condition: service_started
+    ports:
+      - "${MCPO_PORT}:8000"
+    volumes:
+      - ./mcpo/config.json:/config/config.json:ro
+    command: [
+      "--host", "0.0.0.0",
+      "--port", "8000",
+      "--api-key", "${MCPO_API_KEY}",
+      "--config", "/config/config.json"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  share_pg_data:

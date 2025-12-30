@@ -1,0 +1,437 @@
+# 网络配置说明 (Network Configuration)
+
+## 网络架构 (Network Architecture)
+
+本项目的所有服务都连接到名为 `share_ai_network` 的Docker桥接网络。
+
+### 网络配置
+
+```yaml
+networks:
+  share_network:
+    driver: bridge
+    name: share_ai_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+```
+
+- **网络名称**: `share_ai_network`
+- **子网**: `172.20.0.0/16`
+- **驱动**: bridge
+
+---
+
+## 内部服务通信 (Internal Service Communication)
+
+### 容器间服务名访问
+
+所有容器之间通过**服务名（service name）**直接访问，无需使用LAN IP或localhost。
+
+#### PostgreSQL 数据库
+
+```
+容器内访问地址: postgres:5432
+连接字符串: postgresql://user:pass@postgres:5432/database
+```
+
+**访问的服务**:
+- new-api
+- litellm
+- pg_init
+
+#### Valkey 缓存
+
+```
+容器内访问地址: valkey:6379
+连接字符串: redis://default:password@valkey:6379
+```
+
+**访问的服务**:
+- new-api
+- litellm
+
+#### LiteLLM API & MCP
+
+```
+容器内访问地址: litellm:4000
+API端点: http://litellm:4000
+MCP端点: http://litellm:4000/deepwiki_mcp/mcp
+```
+
+**访问的服务**:
+- mcpo (访问MCP端点)
+
+#### new-api API网关
+
+```
+容器内访问地址: new-api:3000
+API端点: http://new-api:3000
+```
+
+#### mcpo MCP转换器
+
+```
+容器内访问地址: mcpo:8000
+API端点: http://mcpo:8000
+```
+
+---
+
+## 内部服务发现 (Internal Service Discovery)
+
+### 服务名称映射表
+
+| 服务名 | 容器名 | 内部地址 | 外部端口 |
+|--------|--------|---------|---------|
+| postgres | share_postgres | postgres:5432 | 5439 |
+| valkey | share_valkey | valkey:6379 | 6389 |
+| new-api | share_newapi | new-api:3000 | 3000 |
+| litellm | share_litellm | litellm:4000 | 4000 |
+| mcpo | share_mcpo | mcpo:8000 | 8010 |
+
+### DNS解析
+
+Docker内置DNS服务器自动解析服务名：
+
+```bash
+# 在任何容器内测试连接
+docker exec share_newapi nslookup postgres
+docker exec share_newapi ping valkey
+docker exec share_newapi curl -s http://litellm:4000/health
+```
+
+---
+
+## 外部服务接入 (External Service Integration)
+
+### 场景1: OpenWebUI / LobeHub / Dify 接入
+
+如果这些服务在**不同的docker-compose.yml**中运行，需要加入本网络：
+
+#### 方法A: 修改外部服务的docker-compose.yml
+
+```yaml
+services:
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    networks:
+      - share_ai_network  # 加入现有网络
+    external_links:
+      - share_newapi:new-api      # 可选：创建别名
+      - share_litellm:litellm
+      - share_mcpo:mcpo
+    environment:
+      # API网关配置
+      OPENAI_API_BASE: "http://new-api:3000/v1"
+      # MCP配置
+      MCP_SERVER_URL: "http://mcpo:8000"
+
+networks:
+  share_ai_network:
+    external: true  # 重要：声明为外部网络
+    name: share_ai_network
+```
+
+#### 方法B: 使用docker命令行
+
+```bash
+# 启动外部服务后，将其连接到网络
+docker network connect share_ai_network openwebui
+docker network connect share_ai_network lobehub
+docker network connect share_ai_network dify-api
+docker network connect share_ai_network dify-worker
+```
+
+### 场景2: 在宿主机上运行的服务
+
+宿主机上的服务可以通过 `localhost:端口` 或 `LAN_IP:端口` 访问：
+
+```yaml
+external_service:
+  image: your-service
+  environment:
+    # 使用宿主机网关IP（通常是172.20.0.1）
+    API_ENDPOINT: "http://172.20.0.1:3000/v1"
+```
+
+查找宿主机网关IP：
+
+```bash
+docker inspect share_ai_network | grep Gateway
+```
+
+---
+
+## API和MCP访问配置
+
+### 1. new-api 分发的API
+
+#### 内部访问（推荐）
+
+```bash
+# 其他容器访问
+http://new-api:3000/v1/chat/completions
+http://new-api:3000/v1/models
+http://new-api:3000/v1/embeddings
+```
+
+#### 外部访问（宿主机或其他机器）
+
+```bash
+# 局域网内访问
+http://YOUR_SERVER_IP:3000/v1/chat/completions
+http://YOUR_SERVER_IP:3000/v1/models
+
+# 或使用localhost（仅在宿主机上）
+http://localhost:3000/v1/chat/completions
+```
+
+### 2. LiteLLM 分发的MCP
+
+#### MCP端点列表
+
+LiteLLM提供以下MCP端点（通过mcpo转换为OpenAPI）：
+
+```
+# deepwiki MCP
+http://litellm:4000/deepwiki_mcp/mcp
+
+# 未来添加的MCP服务器
+http://litellm:4000/{mcp_name}/mcp
+```
+
+#### 通过mcpo访问（推荐）
+
+mcpo将MCP协议转换为OpenAPI，更易于集成：
+
+```json
+{
+  "mcpServers": {
+    "deepwiki": {
+      "url": "http://mcpo:8000/proxy/deepwiki",
+      "headers": {
+        "x-api-key": "sk-your-mcpo-key"
+      }
+    }
+  }
+}
+```
+
+#### litellm/config.yaml MCP配置
+
+```yaml
+mcp_servers:
+  deepwiki_mcp:
+    url: "https://mcp.deepwiki.com/mcp"
+
+  # 添加更多MCP服务器
+  # mcp_server_name:
+  #   url: "http://external-mcp:port/mcp"
+```
+
+---
+
+## 网络测试和验证
+
+### 测试容器间连接
+
+```bash
+# 测试postgres连接
+docker exec share_newapi wget -qO- postgres:5432 || echo "Postgres reachable"
+
+# 测试valkey连接
+docker exec share_newapi redis-cli -h valkey -p 6379 -a YOUR_PASSWORD ping
+
+# 测试litellm连接
+docker exec share_mcpo curl -f http://litellm:4000/health
+
+# 测试new-api连接
+docker exec share_litellm curl -f http://new-api:3000/api/status
+```
+
+### 查看网络信息
+
+```bash
+# 查看网络详情
+docker network inspect share_ai_network
+
+# 查看容器网络配置
+docker inspect share_newapi | grep -A 20 Networks
+
+# 查看容器IP分配
+docker network inspect share_ai_network | grep -A 3 Containers
+```
+
+### 测试DNS解析
+
+```bash
+# 在容器内测试DNS
+docker exec share_newapi nslookup postgres
+docker exec share_newapi nslookup litellm
+docker exec share_newapi nslookup valkey
+```
+
+---
+
+## 常见问题 (Troubleshooting)
+
+### 问题1: 容器间无法连接
+
+**症状**: Connection refused 或 Unknown host
+
+**解决方案**:
+1. 确认所有容器都在 `share_ai_network` 网络中:
+   ```bash
+   docker network inspect share_ai_network
+   ```
+
+2. 检查服务名拼写（使用小写的服务名，不是容器名）
+
+3. 确认容器正在运行:
+   ```bash
+   docker compose ps
+   ```
+
+### 问题2: 外部服务无法接入
+
+**症状**: 外部容器无法访问内部服务
+
+**解决方案**:
+1. 使用 `external: true` 声明外部网络:
+   ```yaml
+   networks:
+     share_ai_network:
+       external: true
+       name: share_ai_network
+   ```
+
+2. 或使用命令行连接:
+   ```bash
+   docker network connect share_ai_network external_container_name
+   ```
+
+### 问题3: 宿主机无法访问容器
+
+**症状**: localhost:端口 无法访问
+
+**解决方案**:
+1. 检查端口映射是否正确:
+   ```bash
+   docker compose ps
+   ```
+
+2. 使用宿主机实际IP而不是localhost:
+   ```bash
+   curl http://YOUR_LAN_IP:3000/api/status
+   ```
+
+3. 检查防火墙规则:
+   ```bash
+   sudo ufw status
+   sudo ufw allow 3000/tcp
+   ```
+
+---
+
+## 最佳实践
+
+1. **容器间通信**: 始终使用服务名，不要使用容器IP（会变化）
+2. **外部服务**: 使用 `networks.external` 声明接入现有网络
+3. **端口暴露**: 仅暴露需要外部访问的端口
+4. **服务发现**: 利用Docker内置DNS，无需手动配置/etc/hosts
+5. **安全性**: 敏感服务（数据库）仅暴露给内部网络，不映射到宿主机
+
+---
+
+## 网络拓扑图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  share_ai_network (172.20.0.0/16)           │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  ┌──────────────┐         ┌──────────────┐                 │
+│  │  postgres    │◄────────┤   new-api    │                 │
+│  │   :5432      │         │    :3000      │                 │
+│  └──────────────┘         └──────────────┘                 │
+│         ▲                         ▲                         │
+│         │                         │                         │
+│         ▼                         ▼                         │
+│  ┌──────────────┐         ┌──────────────┐                 │
+│  │  pg_init     │         │   litellm    │                 │
+│  │  (one-shot)  │         │    :4000     │                 │
+│  └──────────────┘         └──────┬───────┘                 │
+│                                   │                          │
+│                                   ▼                          │
+│                            ┌──────────────┐                 │
+│                            │    mcpo     │                  │
+│                            │    :8000     │                  │
+│                            └──────────────┘                 │
+│                                                                   │
+│  ┌──────────────┐                                                │
+│  │   valkey     │                                                │
+│  │    :6379     │                                                │
+│  └──────────────┘                                                │
+│                                                                   │
+└─────────────────────────────────────────────────────────────┘
+         │                              ▲
+         │                              │
+    Port Mapping                 External Services
+    (宿主机访问)                   (OpenWebUI, LobeHub, Dify)
+         │                              │
+    ┌────▼──────────────────────────────┴─────┐
+    │         Ubuntu Server Host              │
+    │  LAN IP: 192.168.x.x                    │
+    └─────────────────────────────────────────┘
+```
+
+---
+
+## 环境变量参考
+
+### 服务内部通信环境变量
+
+```bash
+# PostgreSQL
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+
+# Valkey/Redis
+REDIS_HOST=valkey
+REDIS_PORT=6379
+
+# LiteLLM
+LITELLM_HOST=litellm
+LITELLM_PORT=4000
+LITELLM_API_BASE=http://litellm:4000
+
+# new-api
+NEWAPI_HOST=new-api
+NEWAPI_PORT=3000
+NEWAPI_API_BASE=http://new-api:3000/v1
+
+# mcpo
+MCPO_HOST=mcpo
+MCPO_PORT=8000
+MCPO_API_BASE=http://mcpo:8000
+```
+
+### 外部访问环境变量
+
+```bash
+# 从宿主机访问
+NEWAPI_API_BASE=http://localhost:3000/v1
+LITELLM_API_BASE=http://localhost:4000
+
+# 从局域网其他机器访问
+NEWAPI_API_BASE=http://192.168.x.x:3000/v1
+LITELLM_API_BASE=http://192.168.x.x:4000
+```
+
+---
+
+**最后更新**: 2025-12-30
+**Docker Compose版本**: 3.9

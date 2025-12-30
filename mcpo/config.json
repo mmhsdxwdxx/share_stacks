@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "deepwiki": {
+      "type": "streamable-http",
+      "url": "http://litellm:4000/deepwiki_mcp/mcp",
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "x-litellm-api-key": "Bearer ${LITELLM_API_KEY}"
+      }
+    }
+  }
+}
