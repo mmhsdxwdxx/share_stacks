@@ -156,7 +156,10 @@ SQL
       start_period: 20s
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable
+    build:
+      context: .
+      dockerfile: Dockerfile.litellm
+    image: share-stacks/litellm:custom
     container_name: share_litellm
     restart: always
     networks:
