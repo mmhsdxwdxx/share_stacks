@@ -1,0 +1,13 @@
+# 可选示例：启用 limiter 并复用本堆栈的 Valkey（需要密码）
+#
+# 用法：
+# 1) 把本文件内容合并到 searxng/settings.yml
+# 2) 将 __VALKEY_PASSWORD__ 替换为 .env 里的 VALKEY_PASSWORD
+#
+# 注意：启用 limiter 后，若 Redis 连接失败，SearXNG 可能无法正常启动。
+
+server:
+  limiter: true
+
+redis:
+  url: "redis://:__VALKEY_PASSWORD__@valkey:6379/1"

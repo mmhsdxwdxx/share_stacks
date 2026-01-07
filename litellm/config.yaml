@@ -1,0 +1,17 @@
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  cache: true
+  cache_params:
+    type: redis
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
+
+mcp_servers:
+  deepwiki_mcp:
+    url: "https://mcp.deepwiki.com/mcp"
+  playwright_mcp:
+    url: "http://share_playwright:7070/mcp"

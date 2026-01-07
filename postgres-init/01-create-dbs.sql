@@ -1,0 +1,3 @@
+-- create databases and users using environment variables substituted by docker-entrypoint
+-- NOTE: docker-entrypoint-initdb.d does not expand ${VAR} by itself. We therefore create
+-- separate init that uses psql with envsubst via docker compose (see compose section).

@@ -1,0 +1,484 @@
+version: "3.9"
+
+# 方案一：纯1panel-network（推荐用于1Panel快速部署）
+# 所有服务都在1panel-network中，便于1Panel管理
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: share_postgres
+    restart: always
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ}
+    shm_size: "6gb"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM}
+      - -c
+      - wal_buffers=${POSTGRES_WAL_BUFFERS}
+      - -c
+      - min_wal_size=${POSTGRES_MIN_WAL_SIZE}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE}
+      - -c
+      - checkpoint_timeout=${POSTGRES_CHECKPOINT_TIMEOUT}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET}
+      - -c
+      - default_statistics_target=${POSTGRES_DEFAULT_STATISTICS_TARGET}
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST}
+      - -c
+      - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY}
+      - -c
+      - wal_compression=${POSTGRES_WAL_COMPRESSION}
+      - -c
+      - shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES}
+      - -c
+      - pg_stat_statements.max=${POSTGRES_STAT_STATEMENTS_MAX}
+      - -c
+      - pg_stat_statements.track=${POSTGRES_STAT_STATEMENTS_TRACK}
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT}
+    volumes:
+      - share_pg_data:/var/lib/postgresql/data
+      - ./postgres-init:/init:ro
+    # 16C/48GB baseline (non-Swarm compose supports these keys)
+    mem_limit: 16g
+    cpus: "6.0"
+    # 开发环境可以暴露端口调试，生产环境建议注释掉
+    # ports:
+    #   - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # one-shot init job to create db/users and enable extensions (env-safe)
+  pg_init:
+    image: pgvector/pgvector:pg17
+    container_name: share_pg_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+    env_file: .env
+    volumes:
+      - ./postgres-init:/init:ro
+    entrypoint: ["/bin/sh", "-lc"]
+    command: |
+      psql "postgresql://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/postgres" -v ON_ERROR_STOP=1 \
+        -v gptload_db="$$GPTLOAD_DB_NAME" -v gptload_user="$$GPTLOAD_DB_USER" -v gptload_password="$$GPTLOAD_DB_PASSWORD" \
+        -v litellm_db="$$LITELLM_DB_NAME" -v litellm_user="$$LITELLM_DB_USER" -v litellm_password="$$LITELLM_DB_PASSWORD" \
+        -v firecrawl_db="$$FIRECRAWL_DB_NAME" -v firecrawl_user="$$FIRECRAWL_DB_USER" -v firecrawl_password="$$FIRECRAWL_DB_PASSWORD" <<'SQL'
+      DO $do$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'gptload_user') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %s', :gptload_user, :'gptload_password');
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname = :'gptload_db') THEN
+          EXECUTE format('CREATE DATABASE %I OWNER %I', :gptload_db, :gptload_user);
+        END IF;
+
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'litellm_user') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %s', :litellm_user, :'litellm_password');
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname = :'litellm_db') THEN
+          EXECUTE format('CREATE DATABASE %I OWNER %I', :litellm_db, :litellm_user);
+        END IF;
+
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'firecrawl_user') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %s', :firecrawl_user, :'firecrawl_password');
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname = :'firecrawl_db') THEN
+          EXECUTE format('CREATE DATABASE %I OWNER %I', :firecrawl_db, :firecrawl_user);
+        END IF;
+      END
+      $do$;
+      SQL
+      && psql "postgresql://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/postgres" -v ON_ERROR_STOP=1 -f /init/02-enable-extensions.sql
+
+  valkey:
+    image: valkey/valkey:7.2-alpine
+    container_name: share_valkey
+    restart: always
+    logging: *default-logging
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+      # Reduce fsync stalls on a cache/work-queue workload.
+      - --appendfsync
+      - everysec
+      - --no-appendfsync-on-rewrite
+      - "yes"
+      - --requirepass
+      - "${VALKEY_PASSWORD}"
+      - --maxmemory
+      - "${VALKEY_MAXMEMORY}"
+      - --maxmemory-policy
+      - "${VALKEY_MAXMEMORY_POLICY}"
+    mem_limit: 8g
+    cpus: "2.0"
+    # 开发环境可以暴露端口调试，生产环境建议注释掉
+    # ports:
+    #   - "${VALKEY_PORT}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$(valkey-cli -a ${VALKEY_PASSWORD} ping)\" = \"PONG\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  gpt-load:
+    image: ghcr.io/tbphp/gpt-load:latest
+    container_name: share_gptload
+    restart: always
+    init: true
+    logging: *default-logging
+    depends_on:
+      pg_init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${GPTLOAD_PORT}:3001"
+    volumes:
+      - ./gpt-load-data:/app/data
+    environment:
+      TZ: ${TZ}
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      AUTH_KEY: ${GPTLOAD_AUTH_KEY}
+      ENCRYPTION_KEY: ${GPTLOAD_ENCRYPTION_KEY}
+      DATABASE_DSN: "postgresql://${GPTLOAD_DB_USER}:${GPTLOAD_DB_PASSWORD}@postgres:5432/${GPTLOAD_DB_NAME}?sslmode=disable"
+      REDIS_DSN: "redis://:${VALKEY_PASSWORD}@valkey:6379/0"
+      MAX_CONCURRENT_REQUESTS: ${GPTLOAD_MAX_CONCURRENT_REQUESTS}
+    mem_limit: 2g
+    cpus: "2.0"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "(command -v wget >/dev/null 2>&1 && wget -q --spider -T 10 -O /dev/null http://localhost:3001/health) || (command -v curl >/dev/null 2>&1 && curl -fsS --max-time 10 http://localhost:3001/health >/dev/null) || (command -v busybox >/dev/null 2>&1 && busybox wget -q --spider -T 10 -O /dev/null http://localhost:3001/health)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: share_litellm
+    restart: always
+    init: true
+    logging: *default-logging
+    depends_on:
+      pg_init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${LITELLM_PORT}:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+      - ./logs/litellm:/var/log/litellm
+    environment:
+      TZ: ${TZ}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: "postgresql://${LITELLM_DB_USER}:${LITELLM_DB_PASSWORD}@postgres:5432/${LITELLM_DB_NAME}"
+
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${VALKEY_PASSWORD}
+    mem_limit: 3g
+    cpus: "2.0"
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--run_gunicorn"]
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: share_searxng
+    restart: always
+    init: true
+    logging: *default-logging
+    depends_on:
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${SEARXNG_PORT}:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      TZ: ${TZ}
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL}
+      # 可选：若镜像支持从 env 读取 redis url，可直接复用 Valkey；否则按 searxng/settings.example.yml 手动开启
+      SEARXNG_REDIS_URL: "redis://:${VALKEY_PASSWORD}@valkey:6379/1"
+    mem_limit: 1g
+    cpus: "1.0"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "(command -v wget >/dev/null 2>&1 && wget -q --spider -T 10 -O /dev/null http://localhost:8080/) || (command -v curl >/dev/null 2>&1 && curl -fsS --max-time 10 http://localhost:8080/ >/dev/null) || (command -v busybox >/dev/null 2>&1 && busybox wget -q --spider -T 10 -O /dev/null http://localhost:8080/)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  playwright:
+    image: ${PLAYWRIGHT_IMAGE}
+    container_name: share_playwright
+    restart: always
+    init: true
+    logging: *default-logging
+    shm_size: "4gb"
+    ports:
+      - "${PLAYWRIGHT_PORT}:${PLAYWRIGHT_MCP_PORT}"
+    environment:
+      TZ: ${TZ}
+      PLAYWRIGHT_MCP_PORT: ${PLAYWRIGHT_MCP_PORT}
+      PLAYWRIGHT_HEADLESS: ${PLAYWRIGHT_HEADLESS}
+      PLAYWRIGHT_IGNORE_HTTPS_ERRORS: ${PLAYWRIGHT_IGNORE_HTTPS_ERRORS}
+      PLAYWRIGHT_BLOCK_SERVICE_WORKERS: ${PLAYWRIGHT_BLOCK_SERVICE_WORKERS}
+      PLAYWRIGHT_SHARED_BROWSER_CONTEXT: ${PLAYWRIGHT_SHARED_BROWSER_CONTEXT}
+      PLAYWRIGHT_TIMEOUT_ACTION_MS: ${PLAYWRIGHT_TIMEOUT_ACTION_MS}
+      PLAYWRIGHT_TIMEOUT_NAVIGATION_MS: ${PLAYWRIGHT_TIMEOUT_NAVIGATION_MS}
+      PLAYWRIGHT_SNAPSHOT_MODE: ${PLAYWRIGHT_SNAPSHOT_MODE}
+      PLAYWRIGHT_IMAGE_RESPONSES: ${PLAYWRIGHT_IMAGE_RESPONSES}
+      PLAYWRIGHT_ALLOWED_HOSTS: ${PLAYWRIGHT_ALLOWED_HOSTS}
+      PLAYWRIGHT_CONSOLE_LEVEL: ${PLAYWRIGHT_CONSOLE_LEVEL}
+      PLAYWRIGHT_DEVICE: ${PLAYWRIGHT_DEVICE}
+      PLAYWRIGHT_VIEWPORT_SIZE: ${PLAYWRIGHT_VIEWPORT_SIZE}
+      PLAYWRIGHT_USER_AGENT: ${PLAYWRIGHT_USER_AGENT}
+      PLAYWRIGHT_PROXY_SERVER: ${PLAYWRIGHT_PROXY_SERVER}
+      PLAYWRIGHT_PROXY_BYPASS: ${PLAYWRIGHT_PROXY_BYPASS}
+      PLAYWRIGHT_CAPS: ${PLAYWRIGHT_CAPS}
+      PLAYWRIGHT_OUTPUT_DIR: ${PLAYWRIGHT_OUTPUT_DIR}
+      PLAYWRIGHT_SAVE_SESSION: ${PLAYWRIGHT_SAVE_SESSION}
+      PLAYWRIGHT_SAVE_TRACE: ${PLAYWRIGHT_SAVE_TRACE}
+      PLAYWRIGHT_EXTRA_ARGS: ${PLAYWRIGHT_EXTRA_ARGS}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    mem_limit: 6g
+    cpus: "4.0"
+    pids_limit: 512
+    stop_grace_period: 45s
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        args="--host 0.0.0.0 --port ${PLAYWRIGHT_MCP_PORT} --allowed-hosts ${PLAYWRIGHT_ALLOWED_HOSTS} --console-level ${PLAYWRIGHT_CONSOLE_LEVEL} --snapshot-mode ${PLAYWRIGHT_SNAPSHOT_MODE} --image-responses ${PLAYWRIGHT_IMAGE_RESPONSES} --timeout-action ${PLAYWRIGHT_TIMEOUT_ACTION_MS} --timeout-navigation ${PLAYWRIGHT_TIMEOUT_NAVIGATION_MS}"
+        if [ "${PLAYWRIGHT_HEADLESS}" = "true" ]; then args="$args --headless"; fi
+        if [ "${PLAYWRIGHT_IGNORE_HTTPS_ERRORS}" = "true" ]; then args="$args --ignore-https-errors"; fi
+        if [ "${PLAYWRIGHT_BLOCK_SERVICE_WORKERS}" = "true" ]; then args="$args --block-service-workers"; fi
+        if [ "${PLAYWRIGHT_SHARED_BROWSER_CONTEXT}" = "true" ]; then args="$args --shared-browser-context"; fi
+        if [ -n "${PLAYWRIGHT_DEVICE}" ]; then args="$args --device \"${PLAYWRIGHT_DEVICE}\""; fi
+        if [ -n "${PLAYWRIGHT_VIEWPORT_SIZE}" ]; then args="$args --viewport-size ${PLAYWRIGHT_VIEWPORT_SIZE}"; fi
+        if [ -n "${PLAYWRIGHT_USER_AGENT}" ]; then args="$args --user-agent \"${PLAYWRIGHT_USER_AGENT}\""; fi
+        if [ -n "${PLAYWRIGHT_PROXY_SERVER}" ]; then args="$args --proxy-server ${PLAYWRIGHT_PROXY_SERVER}"; fi
+        if [ -n "${PLAYWRIGHT_PROXY_BYPASS}" ]; then args="$args --proxy-bypass ${PLAYWRIGHT_PROXY_BYPASS}"; fi
+        if [ -n "${PLAYWRIGHT_CAPS}" ]; then args="$args --caps ${PLAYWRIGHT_CAPS}"; fi
+        if [ -n "${PLAYWRIGHT_OUTPUT_DIR}" ]; then args="$args --output-dir ${PLAYWRIGHT_OUTPUT_DIR}"; fi
+        if [ "${PLAYWRIGHT_SAVE_SESSION}" = "true" ]; then args="$args --save-session"; fi
+        if [ "${PLAYWRIGHT_SAVE_TRACE}" = "true" ]; then args="$args --save-trace"; fi
+        if [ -n "${PLAYWRIGHT_EXTRA_ARGS}" ]; then args="$args ${PLAYWRIGHT_EXTRA_ARGS}"; fi
+        echo "playwright run-mcp-server ${args}" >&2
+        exec playwright run-mcp-server ${args}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://localhost:' + (process.env.PLAYWRIGHT_MCP_PORT||'7070') + '/mcp', r => process.exit(0)).on('error', () => process.exit(1));\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 50s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: share_rabbitmq
+    restart: always
+    logging: *default-logging
+    environment:
+      TZ: ${TZ}
+      RABBITMQ_DEFAULT_USER: ${FIRECRAWL_RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${FIRECRAWL_RABBITMQ_PASSWORD}
+    mem_limit: 2g
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  firecrawl-playwright:
+    image: ${PLAYWRIGHT_IMAGE}
+    container_name: share_firecrawl_pw
+    restart: always
+    init: true
+    logging: *default-logging
+    shm_size: "4gb"
+    ports:
+      - "${FIRECRAWL_PW_PORT}:${FIRECRAWL_PW_PORT}"
+    volumes:
+      - ./firecrawl-playwright/server.mjs:/app/server.mjs:ro
+    environment:
+      TZ: ${TZ}
+      PORT: ${FIRECRAWL_PW_PORT}
+      BROWSER: ${FIRECRAWL_PW_BROWSER}
+      HEADLESS: ${FIRECRAWL_PW_HEADLESS}
+      BLOCK_MEDIA: ${FIRECRAWL_PW_BLOCK_MEDIA}
+      WAIT_UNTIL: ${FIRECRAWL_PW_WAIT_UNTIL}
+      MAX_CONCURRENT_PAGES: ${FIRECRAWL_PW_MAX_CONCURRENT_PAGES}
+      NAVIGATION_TIMEOUT_MS: ${FIRECRAWL_PW_NAVIGATION_TIMEOUT_MS}
+      ACTION_TIMEOUT_MS: ${FIRECRAWL_PW_ACTION_TIMEOUT_MS}
+      PROXY_SERVER: ${FIRECRAWL_PROXY_SERVER}
+      PROXY_USERNAME: ${FIRECRAWL_PROXY_USERNAME}
+      PROXY_PASSWORD: ${FIRECRAWL_PROXY_PASSWORD}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    mem_limit: 4g
+    cpus: "2.0"
+    pids_limit: 512
+    stop_grace_period: 45s
+    command: ["node", "/app/server.mjs"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://localhost:' + (process.env.PORT||'3000') + '/health', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1));\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  firecrawl:
+    image: ${FIRECRAWL_IMAGE}
+    container_name: share_firecrawl
+    restart: always
+    init: true
+    logging: *default-logging
+    ports:
+      - "${FIRECRAWL_PORT}:3002"
+    depends_on:
+      pg_init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      firecrawl-playwright:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ}
+      HOST: "0.0.0.0"
+      PORT: "3002"
+      EXPRESS_TRUST_PROXY: "1"
+      USE_DB_AUTHENTICATION: "false"
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${FIRECRAWL_DB_NAME}
+      POSTGRES_USER: ${FIRECRAWL_DB_USER}
+      POSTGRES_PASSWORD: ${FIRECRAWL_DB_PASSWORD}
+
+      REDIS_URL: "redis://:${VALKEY_PASSWORD}@valkey:6379/2"
+      REDIS_RATE_LIMIT_URL: "redis://:${VALKEY_PASSWORD}@valkey:6379/2"
+
+      NUQ_RABBITMQ_URL: "amqp://${FIRECRAWL_RABBITMQ_USER}:${FIRECRAWL_RABBITMQ_PASSWORD}@rabbitmq:5672"
+      PLAYWRIGHT_MICROSERVICE_URL: "http://firecrawl-playwright:${FIRECRAWL_PW_PORT}/scrape"
+
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY}
+      NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_NUM_WORKERS_PER_QUEUE}
+      CRAWL_CONCURRENT_REQUESTS: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS}
+      MAX_CONCURRENT_JOBS: ${FIRECRAWL_MAX_CONCURRENT_JOBS}
+      BROWSER_POOL_SIZE: ${FIRECRAWL_BROWSER_POOL_SIZE}
+      MAX_CPU: ${FIRECRAWL_MAX_CPU}
+      MAX_RAM: ${FIRECRAWL_MAX_RAM}
+
+      PROXY_SERVER: ${FIRECRAWL_PROXY_SERVER}
+      PROXY_USERNAME: ${FIRECRAWL_PROXY_USERNAME}
+      PROXY_PASSWORD: ${FIRECRAWL_PROXY_PASSWORD}
+
+      SEARXNG_ENDPOINT: ${FIRECRAWL_SEARXNG_ENDPOINT}
+      SEARXNG_ENGINES: ${FIRECRAWL_SEARXNG_ENGINES}
+      SEARXNG_CATEGORIES: ${FIRECRAWL_SEARXNG_CATEGORIES}
+
+      OPENAI_API_KEY: ${FIRECRAWL_OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${FIRECRAWL_OPENAI_BASE_URL}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    mem_limit: 10g
+    cpus: "4.0"
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "(command -v wget >/dev/null 2>&1 && wget -q --spider -T 10 -O /dev/null http://localhost:3002/v0/health/liveness) || (command -v curl >/dev/null 2>&1 && curl -fsS --max-time 10 http://localhost:3002/v0/health/liveness >/dev/null) || (command -v busybox >/dev/null 2>&1 && busybox wget -q --spider -T 10 -O /dev/null http://localhost:3002/v0/health/liveness)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 70s
+
+volumes:
+  share_pg_data:
+
+# 使用1panel的默认网络
+networks:
+  default:
+    name: 1panel-network
+    external: true

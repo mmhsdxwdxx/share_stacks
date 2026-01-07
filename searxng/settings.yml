@@ -1,0 +1,19 @@
+use_default_settings: true
+
+general:
+  instance_name: share_searxng
+  debug: false
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  # 建议通过环境变量设置（见 .env / compose）：
+  # - SEARXNG_SECRET
+  # - SEARXNG_BASE_URL
+  #
+  # 默认先关闭 limiter，避免因为 Redis/Valkey 连接参数不匹配导致启动失败。
+  # 如需复用本堆栈的 Valkey，请参考 searxng/settings.example.yml。
+  limiter: false
+
+ui:
+  static_use_hash: true

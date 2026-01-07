@@ -1,0 +1,28 @@
+# Secrets / local env
+.env
+
+# Local data (bind mounts / runtime artifacts)
+logs/
+gpt-load-data/
+.trash/
+
+# Local agent/tool settings
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Common language/tooling caches
+node_modules/
+dist/
+build/
+coverage/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pnpm-store/
